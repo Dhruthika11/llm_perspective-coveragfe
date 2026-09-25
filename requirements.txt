@@ -1,0 +1,17 @@
+sentence-transformers>=2.7.0
+transformers>=4.44.0
+torch>=2.2.0
+accelerate>=0.33.0
+bitsandbytes>=0.43.0  # GPU-only: 4-bit quantization for provider "huggingface" (imported in llm_config.py)
+scikit-learn>=1.4.0
+scipy>=1.12.0
+pandas>=2.2.0
+numpy>=1.26.0
+huggingface_hub>=0.24.0
+tqdm>=4.66.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+groq>=0.9.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+pytest>=8.0.0

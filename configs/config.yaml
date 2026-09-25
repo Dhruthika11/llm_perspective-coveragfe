@@ -1,0 +1,189 @@
+dataset:
+  name: perspectrum
+  raw_dir: data/raw/perspectrum/
+  processed_dir: data/processed/
+  # The REAL file you need for claim text + perspectives (nested clusters).
+  # Get it from: https://github.com/CogComp/perspectrum/tree/master/data/dataset
+  claims_file: perspectrum_with_answers_v1.0.json
+  perspective_pool_file: perspective_pool_v1.0.json
+  evidence_pool_file: evidence_pool_v1.0.json
+  # dataset_split_v1.0.json only maps claim_id -> "train"/"test"/"dev".
+  # It has NO claim text and is optional - used only to tag the split column.
+  dataset_split_file: dataset_split_v1.0.json
+
+llm:
+  model: mistralai/Mistral-7B-Instruct-v0.3
+  provider: huggingface        # "huggingface" or "groq"
+  num_samples_per_claim: 5
+  temperature: 0.8
+  top_p: 0.95
+  # Sampling seed for reproducible generation: the same seed + model + prompt
+  # yields the same k samples per claim (global RNGs are seeded once per
+  # generation run; Groq calls derive per-sample seeds as
+  # seed + crc32(prompt) + sample_index, so k samples of a prompt differ
+  # from each other while identical reruns reproduce exactly).
+  # Null = non-deterministic.
+  seed: 42
+  # Token budget: multi-stance answers are longer than single-stance ones, and
+  # earlier batches already showed truncation of single-stance answers at 220
+  # tokens (generation cut off mid-reasoning before reaching the JSON answer).
+  # 512 gives headroom for 2-3 viewpoints per sample. NOTE: batch memory scales
+  # as batch_size * k * max_new_tokens - if the GPU OOMs, lower
+  # generation.batch_size rather than this.
+  max_new_tokens: 512
+  # Neutral, multi-answer prompt: the model is never told which stance to take
+  # or how many stances to give - one JSON object per distinct stance it holds
+  # (just one if it sees only one side, more if it genuinely sees multiple
+  # sides). Exactly ONE output shape is prescribed (bare objects, one after
+  # another - never an array): small models offered "object OR array" reliably
+  # degenerate to empty arrays ([]), so the array alternative was removed and
+  # a tiny two-stance example added as a format anchor. The "ONLY JSON, no
+  # preamble" line is stance-neutral format strictness: without it the model
+  # rambles in plain prose first and burns the token budget before reaching
+  # the answer. See src/generation/postprocess_generations.py for how each
+  # object is exploded into its own viewpoint row before embedding.
+  prompt_template: >
+    What do you think about the following claim?
+    Claim: "{claim}"
+    Respond with ONLY JSON and no other text - no preamble, no explanation outside the JSON.
+    Give one JSON object per distinct stance you hold on this claim - just one if you see
+    only one side, more if you genuinely see multiple sides. Output the objects directly,
+    one after another - do NOT wrap them in an array. Each object must match exactly
+    this schema:
+    {{"stance": "support" or "undermine", "summary": "2-3 sentences summarizing the answer
+    in the person's own voice", "core_reasoning": "1-2 sentences explaining the reasoning
+    behind the answer"}}
+    Always output at least one JSON object - never an empty response.
+    Example with two stances:
+    {{"stance": "support", "summary": "School uniforms reduce visible inequality among students and simplify mornings for families.", "core_reasoning": "When everyone dresses alike, pressure to display wealth through clothing drops."}}
+    {{"stance": "undermine", "summary": "Uniforms suppress student self-expression during formative years.", "core_reasoning": "Clothing choice is a harmless outlet for identity that schools should not remove."}}
+
+  # Model configurations for supported sizes
+  # Override these via --model cmdline argument, e.g., --model "3b"
+  # All non-reasoning instruction models: temperature is unified at 0.8 across
+  # every entry so cross-model coverage/diversity differences reflect the
+  # models, not different sampling temperatures. max_new_tokens is 512
+  # everywhere (enough for multi-stance JSON answers).
+  # Gated repos (need HF license accept + HF_TOKEN): Llama-3.2-3B,
+  # Mistral-7B, Gemma-3-12B. Qwen repos are ungated.
+  models:
+    "1.5b": {
+      "name": "Qwen/Qwen2.5-1.5B-Instruct",
+      "provider": "huggingface",
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "max_new_tokens": 512,
+    }
+    "3b": {
+      "name": "meta-llama/Llama-3.2-3B-Instruct",
+      "provider": "huggingface",
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "max_new_tokens": 512,
+    }
+    "7b": {
+      "name": "mistralai/Mistral-7B-Instruct-v0.3",
+      "provider": "huggingface",
+      "temperature": 0.8,
+      "top_p": 0.95,
+      # Kept in sync with llm.* above (the default run uses this model):
+      # --model 7b overrides from this entry (see run_pipeline.build_config).
+      "max_new_tokens": 512,
+    }
+    "12b": {
+      "name": "google/gemma-3-12b-it",
+      "provider": "huggingface",
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "max_new_tokens": 512,
+      # 12B 4-bit (~6GB weights) + KV cache for batch_size*k sequences is
+      # tight on a single 16GB T4 at the global batch_size of 10 - run at 4
+      # claims per generate() call instead (auto-applied by
+      # run_pipeline.build_config).
+      "batch_size": 4,
+    }
+    "32b": {
+      "name": "Qwen/Qwen2.5-32B-Instruct",
+      "provider": "huggingface",
+      "temperature": 0.8,
+      "top_p": 0.95,
+      "max_new_tokens": 512,
+      # 32B 4-bit weights (~17GB) EXCEED a single 16GB T4: only run this on
+      # multi-GPU (e.g. Kaggle 2xT4, sharded via device_map="auto" in
+      # llm_config.py) at a small batch (auto-applied by
+      # run_pipeline.build_config). NOTE: from_pretrained downloads the full
+      # fp16 checkpoint (~64GB) before quantizing on load - verify disk space
+      # first, or the run will fail on download, not on VRAM.
+      "batch_size": 2,
+    }
+    # Judge-only entry: NOT a generation subject and NOT in run_pipeline's
+    # --model choices. qwen3.6-27b is the one Qwen model on Groq whose
+    # reasoning can be fully disabled (reasoning_effort "none"), making it a
+    # fast deterministic 27B judge with zero self-bias in any ladder arm
+    # (it judges all five). reasoning_effort is forwarded by
+    # label_pairs_with_llm_judge -> get_llm_client -> GroqLlamaClient.
+    # Judge temperature/token cap still come from calibration.judge_temperature
+    # / judge_max_new_tokens below; the values here mirror them for clarity.
+    "judge-qwen": {
+      "name": "qwen/qwen3.6-27b",
+      "provider": "groq",
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "max_new_tokens": 10,
+      "reasoning_effort": "none",
+    }
+
+generation:
+  # How many claims to decode together in ONE model.generate() call.
+  # batch_size * num_samples_per_claim sequences are decoded per step
+  # (10 claims x 5 samples = 50 concurrent decodes vs 5 in the old
+  # per-claim loop) - roughly a batch_size-fold wall-clock speedup on
+  # GPU, since decode steps stop being single-digit-batch and start
+  # saturating the GPU. Peak activation memory scales with
+  # batch_size * k * max_new_tokens, so lower this (e.g. 4-8) if a
+  # bigger model OOMs, or raise it if the GPU has headroom (T4 x2 /
+  # L4 / A100 can comfortably take 16-32 for a 7B model).
+  batch_size: 10
+  # Flush the raw CSV every N claims so a crash/disconnect doesn't lose
+  # everything generated so far.
+  checkpoint_every_n_claims: 10
+embedding:
+  model: BAAI/bge-large-en-v1.5
+  batch_size: 32
+  normalize: true
+  # BGE models expect this instruction prefix on the query side only
+  query_instruction: "Represent this sentence for searching relevant passages: "
+
+analysis:
+  # Fallback ONLY - used if no calibration has been run yet, or if
+  # use_calibrated_threshold is set to false. This value is an unvalidated
+  # heuristic (0.75 was picked without evidence that it separates "same
+  # perspective" from "different perspective" pairs in BGE cosine-similarity
+  # space). Run `python -m src.analysis.threshold_calibration` to derive a
+  # data-backed threshold from labeled pairs; coverage_score.py will then use
+  # that automatically. See results/metrics/threshold_calibration.json once run.
+  similarity_threshold: 0.75
+  use_calibrated_threshold: true   # prefer the calibrated tau over the line above when available
+  clustering: stance_based      # "stance_based" or "kmeans"
+  kmeans_clusters: 2
+
+calibration:
+  # Settings for src/analysis/threshold_calibration.py (empirical threshold validation)
+  n_llm_samples: 50              # LLM outputs to sample for labeling
+  max_perspectives_per_sample: 6 # cap human perspectives paired per LLM sample (avoid combinatorial blowup)
+  seed: 42
+  judge_mode: llm                # "llm" (LLM-as-judge, strict criteria) or "manual" (human labels via CSV)
+  # Fixed external judge, constant across all ladder arms: qwen3.6-27b on Groq
+  # with reasoning disabled. Deliberately NOT one of the generation subjects,
+  # so no arm is self-judged and taus stay comparable across models.
+  judge_model: judge-qwen        # key into llm.models above (NOT a --model choice)
+  judge_temperature: 0.0         # low temperature for a consistent, strict judge
+  judge_max_new_tokens: 10
+
+paths:
+  llm_outputs_raw: data/llm_outputs/raw_generations/
+  llm_outputs_processed: data/llm_outputs/processed_generations.csv
+  embeddings_dir: results/embeddings/
+  metrics_dir: results/metrics/
+  figures_dir: results/figures/
+  summary_file: results/final_report_summary.json
